@@ -71,7 +71,7 @@ final class UriViewHelper extends AbstractViewHelper
 
     public function render(): string
     {
-        if ($this->viteService->useDevServer()) {
+        if ($this->viteService->useDevServer($this->getRequest())) {
             return $this->viteService->getAssetPathFromDevServer(
                 $this->viteService->determineDevServer($this->getRequest()),
                 $this->arguments['file']

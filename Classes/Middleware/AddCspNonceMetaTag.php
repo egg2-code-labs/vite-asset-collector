@@ -26,7 +26,7 @@ final class AddCspNonceMetaTag implements MiddlewareInterface
             return $handler->handle($request);
         }
 
-        if (!$this->viteService->useDevServer()) {
+        if (!$this->viteService->useDevServer($request)) {
             return $handler->handle($request);
         }
 

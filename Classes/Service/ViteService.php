@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Praetorius\ViteAssetCollector\Service;
 
+use GuzzleHttp\Exception\GuzzleException;
 use Praetorius\ViteAssetCollector\Domain\Model\ViteManifest;
 use Praetorius\ViteAssetCollector\Exception\ViteException;
 use Praetorius\ViteAssetCollector\Utility\VitePathUtility;
@@ -21,26 +22,75 @@ use TYPO3\CMS\Core\Utility\PathUtility;
 class ViteService
 {
     public const DEFAULT_PORT = 5173;
+    public const DEFAULT_TIMEOUT = 0.2;
 
     public function __construct(
-        private readonly FrontendInterface $cache,
-        protected readonly AssetCollector $assetCollector,
-        protected readonly PackageManager $packageManager,
+        private readonly FrontendInterface        $cache,
+        protected readonly AssetCollector         $assetCollector,
+        protected readonly PackageManager         $packageManager,
         protected readonly ExtensionConfiguration $extensionConfiguration
-    ) {}
+    )
+    {
+    }
 
     public function getDefaultManifestFile(): string
     {
         return $this->extensionConfiguration->get('vite_asset_collector', 'defaultManifest');
     }
 
-    public function useDevServer(): bool
+    public function useDevServer(ServerRequestInterface|null $request = null): bool
     {
         $useDevServer = $this->extensionConfiguration->get('vite_asset_collector', 'useDevServer');
-        if ($useDevServer === 'auto') {
+
+        if (
+            $useDevServer === 'auto'
+            && $this->isDevServerReachable($request)
+        ) {
             return Environment::getContext()->isDevelopment();
         }
-        return (bool)$useDevServer;
+
+        if (is_bool($useDevServer)) {
+            return $useDevServer;
+        }
+
+        return false;
+    }
+
+    /**
+     * Determine whether the dev server is reachable by PHP.
+     *
+     * @throws \GuzzleHttp\Exception\GuzzleException
+     * @throws \TYPO3\CMS\Core\Configuration\Exception\ExtensionConfigurationExtensionNotConfiguredException
+     * @throws \TYPO3\CMS\Core\Configuration\Exception\ExtensionConfigurationPathDoesNotExistException
+     */
+    public function isDevServerReachable(ServerRequestInterface|null $request = null): bool|null
+    {
+        if (is_null($request)) {
+            return false;
+        }
+
+        $devServer = $this->determineDevServer($request);
+        $devServerUri = (string)$devServer;
+
+        $client = GeneralUtility::makeInstance(\GuzzleHttp\Client::class, [
+            'base_uri' => $devServerUri,
+            'timeout' => $this->extensionConfiguration->get('vite_asset_collector', 'timeout') ?? self::DEFAULT_TIMEOUT,
+        ]);
+
+        try {
+            $response = $client->request('OPTIONS', '/');
+        } catch (GuzzleException $e) {
+            return false;
+        }
+
+        if (
+            $response->getStatusCode() >= 200
+            && $response->getStatusCode() < 300
+        ) {
+            return true;
+        }
+
+        return false;
     }
 
     public function determineDevServer(ServerRequestInterface $request): UriInterface
@@ -63,12 +113,13 @@ class ViteService
 
     public function addAssetsFromDevServer(
         UriInterface $devServerUri,
-        string $entry,
-        array $assetOptions = [],
-        array $scriptTagAttributes = [],
-        array $cssTagAttributes = [],
-    ): void {
-        $entry = $this->determineAssetIdentifierFromExtensionPath($entry, false);
+        string       $entry,
+        array        $assetOptions = [],
+        array        $scriptTagAttributes = [],
+        array        $cssTagAttributes = [],
+    ): void
+    {
+        $entry = $this->determineAssetIdentifierFromExtensionPath($entry);
         $assetOptions = ['external' => $this->useExternalFlag(), ...$assetOptions];
 
         $scriptTagAttributes = $this->prepareScriptAttributes($scriptTagAttributes);
@@ -97,9 +148,10 @@ class ViteService
 
     public function getAssetPathFromDevServer(
         UriInterface $devServerUri,
-        string $assetFile,
-    ): string {
-        $assetFile = $this->determineAssetIdentifierFromExtensionPath($assetFile, false);
+        string       $assetFile,
+    ): string
+    {
+        $assetFile = $this->determineAssetIdentifierFromExtensionPath($assetFile);
         return (string)$devServerUri->withPath($assetFile);
     }
 
@@ -123,26 +175,24 @@ class ViteService
     public function addAssetsFromManifest(
         string $manifestFile,
         string $entry,
-        bool $addCss = true,
-        array $assetOptions = [],
-        array $scriptTagAttributes = [],
-        array $cssTagAttributes = []
-    ): void {
+        bool   $addCss = true,
+        array  $assetOptions = [],
+        array  $scriptTagAttributes = [],
+        array  $cssTagAttributes = []
+    ): void
+    {
+        $entry = $this->determineAssetIdentifierFromExtensionPath($entry);
+
         $manifestFile = $this->resolveManifestFile($manifestFile);
         $outputDir = $this->determineOutputDirFromManifestFile($manifestFile);
         $manifest = $this->parseManifestFile($manifestFile);
 
-        $originalEntry = $entry;
-        $entry = $this->determineAssetIdentifierFromExtensionPath($entry, false);
         if (!$manifest->get($entry)?->isEntry) {
-            $entry = $this->determineAssetIdentifierFromExtensionPath($originalEntry, true);
-            if (!$manifest->get($entry)?->isEntry) {
-                throw new ViteException(sprintf(
-                    'Invalid vite entry point "%s" in manifest file "%s".',
-                    $entry,
-                    $manifestFile
-                ), 1683200524);
-            }
+            throw new ViteException(sprintf(
+                'Invalid vite entry point "%s" in manifest file "%s".',
+                $entry,
+                $manifestFile
+            ), 1683200524);
         }
 
         // The "external" flag has been introduced with TYPO3 v13. It allows bypassing
@@ -204,22 +254,19 @@ class ViteService
     public function getAssetPathFromManifest(
         string $manifestFile,
         string $assetFile,
-        bool $returnWebPath = true
-    ): string {
+        bool   $returnWebPath = true
+    ): string
+    {
+        $assetFile = $this->determineAssetIdentifierFromExtensionPath($assetFile);
+
         $manifestFile = $this->resolveManifestFile($manifestFile);
         $manifest = $this->parseManifestFile($manifestFile);
-
-        $originalAssetFile = $assetFile;
-        $assetFile = $this->determineAssetIdentifierFromExtensionPath($assetFile, false);
         if (!$manifest->get($assetFile)) {
-            $assetFile = $this->determineAssetIdentifierFromExtensionPath($originalAssetFile, true);
-            if (!$manifest->get($assetFile)) {
-                throw new ViteException(sprintf(
-                    'Invalid asset file "%s" in vite manifest file "%s".',
-                    $assetFile,
-                    $manifestFile
-                ), 1690735353);
-            }
+            throw new ViteException(sprintf(
+                'Invalid asset file "%s" in vite manifest file "%s".',
+                $assetFile,
+                $manifestFile
+            ), 1690735353);
         }
 
         $assetPath = $this->determineOutputDirFromManifestFile($manifestFile) . $manifest->get($assetFile)->file;
@@ -257,7 +304,7 @@ class ViteService
         return $manifest;
     }
 
-    protected function determineAssetIdentifierFromExtensionPath(string $identifier, bool $resolveSymlinks = true): string
+    protected function determineAssetIdentifierFromExtensionPath(string $identifier): string
     {
         if (!PathUtility::isExtensionPath($identifier)) {
             return $identifier;
@@ -265,17 +312,16 @@ class ViteService
 
         $absolutePath = $this->packageManager->resolvePackagePath($identifier);
         $file = PathUtility::basename($absolutePath);
-        $dir = PathUtility::dirname($absolutePath);
-        if ($resolveSymlinks) {
-            $dir = realpath($dir);
-            if ($dir === false) {
-                throw new ViteException(sprintf(
-                    'The specified extension path "%s" does not exist.',
-                    $identifier
-                ), 1696238083);
-            }
+        $dir = realpath(PathUtility::dirname($absolutePath));
+        if ($dir === false) {
+            throw new ViteException(sprintf(
+                'The specified extension path "%s" does not exist.',
+                $identifier
+            ), 1696238083);
         }
-        $relativeDirToProjectRoot = $this->stripProjectPath($dir);
+        // TODO PathUtility::getRelativePath() is deprecated
+        $relativeDirToProjectRoot = PathUtility::getRelativePath(Environment::getProjectPath(), $dir);
+
         return $relativeDirToProjectRoot . $file;
     }
 
@@ -297,18 +343,6 @@ class ViteService
     {
         // TODO remove this when support for TYPO3 v12 is dropped
         return (new \TYPO3\CMS\Core\Information\Typo3Version())->getMajorVersion() >= 13;
-    }
-
-    /**
-     * @return string Given path without project prefix, with trailing slash
-     */
-    protected function stripProjectPath(string $path): string
-    {
-        $projectPath = Environment::getProjectPath() . '/';
-        if (str_starts_with($path, $projectPath)) {
-            $path = substr($path, strlen($projectPath));
-        }
-        return rtrim($path, '/') . '/';
     }
 
     protected function prepareScriptAttributes(array $attributes): array

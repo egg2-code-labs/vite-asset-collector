@@ -93,7 +93,7 @@ final class AssetViewHelper extends AbstractViewHelper
         $entry = $this->arguments['entry'];
         $entry ??= $this->viteService->determineEntrypointFromManifest($manifest);
 
-        if ($this->viteService->useDevServer()) {
+        if ($this->viteService->useDevServer($this->getRequest())) {
             $this->viteService->addAssetsFromDevServer(
                 $this->viteService->determineDevServer($this->getRequest()),
                 $entry,
